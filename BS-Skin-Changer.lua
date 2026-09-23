@@ -1,9 +1,352 @@
+-- Embedded BS-UI launcher
+do
+local RunService = game:GetService("RunService")
+local Camera = workspace.CurrentCamera
+
+local STATE_KEY = "__BS_UI_STATE"
+local FADE_DURATION = 0.70
+local FADE_PHASE_DURATION = 0.80
+local LOAD_DURATION = 2.00
+local FULL_HOLD_DURATION = 0.15
+local MOVE_DURATION = 0.75
+local PANEL_WIDTH = 340
+local PANEL_HEIGHT = 165
+local COMPACT_WIDTH = 118
+local COMPACT_HEIGHT = 34
+local COMPACT_LEFT_OFFSET = 130
+local COMPACT_TOP_OFFSET = 46
+
+local previous = _G[STATE_KEY]
+if type(previous) == "table" and type(previous.Destroy) == "function" then
+    pcall(previous.Destroy)
+end
+
+local state = {
+    running = true,
+    drawings = {},
+    connection = nil,
+    geometry = {},
+}
+_G[STATE_KEY] = state
+
+local function clamp(value, minimum, maximum)
+    if value < minimum then
+        return minimum
+    end
+    if value > maximum then
+        return maximum
+    end
+    return value
+end
+
+local function lerp(a, b, amount)
+    return a + (b - a) * amount
+end
+
+local function easeOutCubic(value)
+    local inverse = 1 - clamp(value, 0, 1)
+    return 1 - inverse * inverse * inverse
+end
+
+local function easeInOutCubic(value)
+    value = clamp(value, 0, 1)
+    if value < 0.5 then
+        return 4 * value * value * value
+    end
+    local inverse = -2 * value + 2
+    return 1 - inverse * inverse * inverse / 2
+end
+
+local function add(kind)
+    local object = Drawing.new(kind)
+    object.Visible = false
+    state.drawings[#state.drawings + 1] = object
+    return object
+end
+
+local function square(color, filled, zIndex, corner)
+    local object = add("Square")
+    object.Color = color
+    object.Filled = filled
+    object.Thickness = filled and 1 or 1.25
+    object.ZIndex = zIndex
+    if corner then
+        pcall(function()
+            object.Corner = corner
+        end)
+    end
+    return object
+end
+
+local function text(value, color, size, font, zIndex, centered)
+    local object = add("Text")
+    object.Text = value
+    object.Color = color
+    object.Size = size
+    object.Font = font
+    object.Center = centered ~= false
+    object.Outline = false
+    object.ZIndex = zIndex
+    return object
+end
+
+local function circle(color, radius, zIndex)
+    local object = add("Circle")
+    object.Color = color
+    object.Radius = radius
+    object.NumSides = 36
+    object.Filled = true
+    object.Thickness = 1
+    object.ZIndex = zIndex
+    return object
+end
+
+local function spacedText(value, color, size, font, zIndex, spacing)
+    local group = {
+        characters = {},
+        widths = {},
+        spacing = spacing,
+    }
+    for index = 1, #value do
+        local characterValue = value:sub(index, index)
+        group.characters[index] = text(characterValue, color, size, font, zIndex, true)
+        group.widths[index] = characterValue == " " and size * 0.35 or size * 0.55
+    end
+    return group
+end
+
+local function positionSpacedText(group, centerX, y)
+    local count = #group.characters
+    local totalWidth = group.spacing * math.max(count - 1, 0)
+    for index, character in ipairs(group.characters) do
+        local bounds = character.TextBounds
+        if bounds and bounds.X and bounds.X > 0 then
+            group.widths[index] = bounds.X
+        end
+        totalWidth = totalWidth + group.widths[index]
+    end
+
+    local cursor = centerX - totalWidth * 0.5
+    for index, character in ipairs(group.characters) do
+        local width = group.widths[index]
+        character.Position = Vector2.new(cursor + width * 0.5, y)
+        cursor = cursor + width + group.spacing
+    end
+end
+
+local function setGroupOpacity(group, opacity)
+    for _, character in ipairs(group.characters) do
+        character.Transparency = clamp(opacity, 0, 1)
+    end
+end
+
+local panel = square(Color3.fromRGB(13, 16, 23), true, 10, 12)
+local border = square(Color3.fromRGB(255, 255, 255), false, 11, 12)
+local innerBorder = square(Color3.fromRGB(255, 255, 255), false, 12, 11)
+
+local title = text("BloxStrike", Color3.fromRGB(232, 234, 240), 28, 2, 19, true)
+local subtitle = spacedText("SKIN CHANGER", Color3.fromRGB(150, 170, 200), 13, 0, 19, 4.6)
+local loadingLabel = text("Loading Assets...", Color3.fromRGB(120, 140, 170), 10, 5, 19, false)
+local percentLabel = text("0%", Color3.fromRGB(120, 140, 170), 10, 5, 19, true)
+
+local barGlowWide = square(Color3.fromRGB(96, 165, 250), true, 13, 5)
+local barGlowTight = square(Color3.fromRGB(96, 165, 250), true, 14, 3)
+local barTrack = square(Color3.fromRGB(255, 255, 255), true, 15, 2)
+local barSegments = {}
+local BAR_SEGMENT_COUNT = 18
+for index = 1, BAR_SEGMENT_COUNT do
+    local amount = (index - 1) / (BAR_SEGMENT_COUNT - 1)
+    local red = math.floor(59 + (147 - 59) * amount + 0.5)
+    local green = math.floor(130 + (197 - 130) * amount + 0.5)
+    local blue = math.floor(246 + (253 - 246) * amount + 0.5)
+    barSegments[index] = square(Color3.fromRGB(red, green, blue), true, 16, 2)
+end
+
+local statusText = text("Skin Changer", Color3.fromRGB(226, 232, 240), 12, 2, 19, true)
+local dotGlowOuter = circle(Color3.fromRGB(34, 197, 94), 11, 15)
+local dotGlowInner = circle(Color3.fromRGB(34, 197, 94), 7, 16)
+local dot = circle(Color3.fromRGB(34, 197, 94), 4, 17)
+
+local function setOpacity(object, opacity)
+    object.Transparency = clamp(opacity, 0, 1)
+end
+
+local function setRect(object, x, y, width, height)
+    object.Position = Vector2.new(x, y)
+    object.Size = Vector2.new(math.max(width, 0.01), math.max(height, 0.01))
+end
+
+local function setCorner(object, radius)
+    pcall(function()
+        object.Corner = radius
+    end)
+end
+
+local function viewportSize()
+    local size = Camera and Camera.ViewportSize
+    if size then
+        return size.X, size.Y
+    end
+    return 1920, 1080
+end
+
+local function destroy()
+    if not state.running then
+        return
+    end
+    state.running = false
+    if state.connection then
+        pcall(function()
+            state.connection:Disconnect()
+        end)
+        state.connection = nil
+    end
+    for _, object in ipairs(state.drawings) do
+        pcall(function()
+            object:Remove()
+        end)
+    end
+    state.drawings = {}
+    if _G[STATE_KEY] == state then
+        _G[STATE_KEY] = nil
+    end
+end
+
+state.Destroy = destroy
+_G.__BS_UI_STOP = destroy
+
+local startedAt = os.clock()
+state.connection = RunService.RenderStepped:Connect(function()
+    if not state.running or _G[STATE_KEY] ~= state then
+        destroy()
+        return
+    end
+
+    local now = os.clock()
+    local elapsed = now - startedAt
+    local screenWidth, screenHeight = viewportSize()
+
+    local fade = easeOutCubic(elapsed / FADE_DURATION)
+    local loadElapsed = math.max(elapsed - FADE_PHASE_DURATION, 0)
+    local progress = clamp(loadElapsed / LOAD_DURATION, 0, 1)
+    local moveStart = FADE_PHASE_DURATION + LOAD_DURATION + FULL_HOLD_DURATION
+    local moveRaw = clamp((elapsed - moveStart) / MOVE_DURATION, 0, 1)
+    local move = easeInOutCubic(moveRaw)
+
+    if elapsed < FADE_PHASE_DURATION then
+        state.phase = "fadeIn"
+    elseif progress < 1 then
+        state.phase = "loading"
+    elseif elapsed < moveStart then
+        state.phase = "hold"
+    elseif moveRaw < 1 then
+        state.phase = "dragging"
+    else
+        state.phase = "active"
+    end
+    state.elapsed = elapsed
+    state.progress = progress
+
+    local entranceScale = lerp(0.97, 1, fade)
+    local splashWidth = PANEL_WIDTH * entranceScale
+    local splashHeight = PANEL_HEIGHT * entranceScale
+    local startX = (screenWidth - splashWidth) * 0.5
+    local startY = (screenHeight - splashHeight) * 0.5 + lerp(PANEL_HEIGHT * 0.02, 0, fade)
+    local endX = screenWidth - COMPACT_LEFT_OFFSET
+    local endY = screenHeight - COMPACT_TOP_OFFSET
+
+    local width = lerp(splashWidth, COMPACT_WIDTH, move)
+    local height = lerp(splashHeight, COMPACT_HEIGHT, move)
+    local x = lerp(startX, endX, move)
+    local y = lerp(startY, endY, move)
+
+    state.geometry.x = x
+    state.geometry.y = y
+    state.geometry.width = width
+    state.geometry.height = height
+
+    local panelCorner = lerp(12, 10, move)
+    setRect(panel, x, y, width, height)
+    setRect(border, x, y, width, height)
+    setRect(innerBorder, x + 1, y + 1, math.max(width - 2, 1), math.max(height - 2, 1))
+    setCorner(panel, panelCorner)
+    setCorner(border, panelCorner)
+    setCorner(innerBorder, math.max(panelCorner - 1, 0))
+    setOpacity(panel, fade * lerp(0.97, 0.55, move))
+    setOpacity(border, fade * 0.07)
+    setOpacity(innerBorder, fade * 0.04 * (1 - move))
+
+    local splashOpacity = moveRaw > 0 and 0 or fade
+    title.Position = Vector2.new(x + width * 0.5, y + 32)
+    positionSpacedText(subtitle, x + width * 0.5, y + 67)
+    setOpacity(title, splashOpacity)
+    setGroupOpacity(subtitle, splashOpacity * 0.70)
+
+    local barX = x + 36
+    local barY = y + 111
+    local barWidth = math.max(width - 72, 1)
+    local filledWidth = barWidth * progress
+    setRect(barTrack, barX, barY, barWidth, 3)
+    setOpacity(barTrack, splashOpacity * 0.06)
+    setRect(barGlowWide, barX - 3, barY - 4, math.max(filledWidth + 6, 0.01), 11)
+    setRect(barGlowTight, barX - 1, barY - 2, math.max(filledWidth + 2, 0.01), 7)
+    setOpacity(barGlowWide, filledWidth > 0 and splashOpacity * 0.10 or 0)
+    setOpacity(barGlowTight, filledWidth > 0 and splashOpacity * 0.22 or 0)
+
+    local segmentWidth = barWidth / BAR_SEGMENT_COUNT
+    for index, segment in ipairs(barSegments) do
+        local segmentStart = (index - 1) * segmentWidth
+        local visibleWidth = clamp(filledWidth - segmentStart, 0, segmentWidth + 0.35)
+        setRect(segment, barX + segmentStart, barY, math.max(visibleWidth, 0.01), 3)
+        setOpacity(segment, visibleWidth > 0 and splashOpacity or 0)
+    end
+
+    loadingLabel.Position = Vector2.new(barX, y + 122)
+    percentLabel.Position = Vector2.new(barX + barWidth - 10, y + 122)
+    percentLabel.Text = tostring(math.floor(progress * 100 + 0.5)) .. "%"
+    setOpacity(loadingLabel, splashOpacity * 0.60)
+    setOpacity(percentLabel, splashOpacity * 0.60)
+
+    local compactOpacity = 0
+    if moveRaw > 0 then
+        compactOpacity = moveRaw < 1 and 0.60 or 1
+    end
+    local dotX = x + 15
+    local dotY = y + height * 0.5
+    local compactTextCenterX = x + ((13 + 4) + COMPACT_WIDTH) * 0.5
+    statusText.Position = Vector2.new(compactTextCenterX, y + math.floor((height - 12) * 0.5 + 5.5))
+
+    local pulse = 0.5 - 0.5 * math.cos(now * math.pi)
+    dotGlowOuter.Position = Vector2.new(dotX, dotY)
+    dotGlowInner.Position = Vector2.new(dotX, dotY)
+    dot.Position = Vector2.new(dotX, dotY)
+    dotGlowOuter.Radius = 7 + pulse * 4
+    dotGlowInner.Radius = 5 + pulse * 3
+
+    setOpacity(statusText, compactOpacity)
+    setOpacity(dotGlowOuter, compactOpacity * (0.18 + pulse * 0.17))
+    setOpacity(dotGlowInner, compactOpacity * (0.35 + pulse * 0.25))
+    setOpacity(dot, compactOpacity)
+
+    if not state.shown then
+        for _, object in ipairs(state.drawings) do
+            object.Visible = true
+        end
+        state.shown = true
+    end
+end)
+
+print("[BS-UI] Loading animation started")
+end
+
+task.spawn(function()
+task.wait()
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
-local Assets = ReplicatedStorage:WaitForChild("Assets", 30)
-local Weapons = Assets and Assets:WaitForChild("Weapons", 30)
-local Skins = Assets and Assets:WaitForChild("Skins", 30)
+local Assets = ReplicatedStorage:FindFirstChild("Assets")
+local Weapons = Assets and Assets:FindFirstChild("Weapons")
+local Skins = Assets and Assets:FindFirstChild("Skins")
 local WeaponAnimations = Assets and Assets:FindFirstChild("WeaponAnimations")
 local WeaponModules = ReplicatedStorage:FindFirstChild("Database")
 WeaponModules = WeaponModules and WeaponModules:FindFirstChild("Custom")
@@ -669,3 +1012,4 @@ else
     _G[TEST_API_KEY] = nil
     run()
 end
+end)
