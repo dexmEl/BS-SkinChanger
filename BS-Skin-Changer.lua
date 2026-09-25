@@ -1,4 +1,3 @@
--- Embedded BS-UI launcher
 do
 local RunService = game:GetService("RunService")
 local Camera = workspace.CurrentCamera
@@ -342,8 +341,8 @@ end
 task.spawn(function()
 task.wait()
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local LocalPlayer = Players.LocalPlayer
 local Assets = ReplicatedStorage:FindFirstChild("Assets")
 local Weapons = Assets and Assets:FindFirstChild("Weapons")
 local Skins = Assets and Assets:FindFirstChild("Skins")
@@ -389,6 +388,52 @@ local function normalizeTeam(value)
         return "T"
     end
     return nil
+end
+
+local function readCurrentTeam(playersService)
+    local player = playersService and playersService.LocalPlayer
+    if not player then
+        return nil
+    end
+
+    local okAttribute, attribute = pcall(function()
+        return player:GetAttribute("Team")
+    end)
+    local team = okAttribute and normalizeTeam(attribute) or nil
+    if team then
+        return team
+    end
+
+    local okTeam, playerTeam = pcall(function()
+        return player.Team
+    end)
+    return okTeam and playerTeam and normalizeTeam(playerTeam.Name) or nil
+end
+
+local function startTeamWatcher(runService, state, playersService, applyTeam, isCurrent)
+    local elapsed = 0
+    local connection = nil
+    connection = runService.Heartbeat:Connect(function(deltaTime)
+        if not state.running or not isCurrent() then
+            connection:Disconnect()
+            state.teamConnection = nil
+            return
+        end
+
+        elapsed = elapsed + (tonumber(deltaTime) or 0.1)
+        if elapsed < 0.1 then
+            return
+        end
+        elapsed = 0
+        state.teamWatchChecks = (state.teamWatchChecks or 0) + 1
+
+        local team = readCurrentTeam(playersService)
+        if team and team ~= state.team then
+            applyTeam(team)
+        end
+    end)
+    state.teamConnection = connection
+    return connection
 end
 
 local function parseConfig(text)
@@ -644,6 +689,8 @@ _G[TEST_API_KEY] = {
     ItemClass = itemClass,
     BuildTeamJobs = buildTeamJobs,
     BuildActiveJobs = buildActiveJobs,
+    ReadCurrentTeam = readCurrentTeam,
+    StartTeamWatcher = startTeamWatcher,
 }
 
 local function rd(address)
@@ -877,7 +924,7 @@ local function reportErrors(prefix, errors)
 end
 
 local function run()
-    if not Assets or not Weapons or not Skins or not LocalPlayer then
+    if not Assets or not Weapons or not Skins or not Players.LocalPlayer then
         warn("[BS-Skin-Changer] Bloxstrike assets or LocalPlayer are unavailable")
         return
     end
@@ -891,6 +938,12 @@ local function run()
     local previous = _G[STATE_KEY]
     if type(previous) == "table" then
         previous.running = false
+        if previous.teamConnection then
+            pcall(function()
+                previous.teamConnection:Disconnect()
+            end)
+            previous.teamConnection = nil
+        end
         if previous.jobId == game.JobId and previous.assetsAddress == Assets.Address then
             local count = restoreSwaps(previous.restores)
             if count > 0 then
@@ -920,6 +973,8 @@ local function run()
         configPath = configPath,
         parsed = parsed,
         team = nil,
+        teamConnection = nil,
+        teamWatchChecks = 0,
         restores = {},
         jobs = {},
     }
@@ -982,27 +1037,27 @@ local function run()
             return
         end
         state.running = false
+        if state.teamConnection then
+            pcall(function()
+                state.teamConnection:Disconnect()
+            end)
+            state.teamConnection = nil
+        end
         local restored = restoreSwaps(state.restores)
         state.restores = {}
         _G[STATE_KEY] = nil
         print("[BS-Skin-Changer] Stopped and restored " .. restored .. " swaps")
     end
 
-    local initialTeam = LocalPlayer:GetAttribute("Team")
-    if normalizeTeam(initialTeam) then
+    local initialTeam = readCurrentTeam(Players)
+    if initialTeam then
         applyTeam(initialTeam)
     else
         print("[BS-Skin-Changer] Config loaded from " .. configPath .. "; waiting for a team assignment")
     end
 
-    task.spawn(function()
-        while state.running and _G[STATE_KEY] == state do
-            local team = normalizeTeam(LocalPlayer:GetAttribute("Team"))
-            if team and team ~= state.team then
-                applyTeam(team)
-            end
-            task.wait(0.1)
-        end
+    startTeamWatcher(RunService, state, Players, applyTeam, function()
+        return _G[STATE_KEY] == state
     end)
 end
 
